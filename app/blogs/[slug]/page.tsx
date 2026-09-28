@@ -1,0 +1,8 @@
+import Link from "next/link";
+import {notFound} from "next/navigation";
+import type {Metadata} from "next";
+import {posts} from "@/lib/posts";
+export function generateStaticParams(){return posts.map(p=>({slug:p.slug}))}
+export const dynamicParams=false;
+export async function generateMetadata({params}:{params:Promise<{slug:string}>}):Promise<Metadata>{const {slug}=await params;const post=posts.find(p=>p.slug===slug);return {title:post?.title??"Article",description:post?.summary}}
+export default async function Article({params}:{params:Promise<{slug:string}>}){const {slug}=await params;const post=posts.find(p=>p.slug===slug);if(!post)notFound();return <main id="main"><article className="article"><Link href="/blogs/" className="text-link">← All articles</Link><header className="article-header"><p className="eyebrow">{post.category} / {post.readTime}<span className="draft-label">DRAFT</span></p><h1>{post.title}</h1><p className="article-summary">{post.summary}</p><p className="article-byline">Written by Swathiga</p></header>{post.sections.map(section=><section key={section.title} className="article-section"><h2>{section.title}</h2>{section.paragraphs.map(p=><p key={p}>{p}</p>)}{section.code&&<pre tabIndex={0} aria-label={`${section.title} code example`}><code>{section.code}</code></pre>}</section>)}{post.slug==='deploying-with-coolify'&&<p className="article-source">Reference: <a href="https://coolify.io/docs/start-with-self-hosted" target="_blank" rel="noreferrer">Coolify’s official installation guide ↗</a></p>}<Link href="/blogs/" className="text-link">← Back to the blog</Link></article></main>}
