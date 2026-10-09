@@ -1,0 +1,77 @@
+{
+  "slug": "how-i-built-reviewmind",
+  "title": "How I Built ReviewMind: A History-Aware PR Reviewer (Hackathon Project)",
+  "category": "BACKEND & AI",
+  "summary": "Building a history-aware GitHub pull request reviewer with IBM Bob, watsonx.ai, and pgvector for the IBM Bob 2.0 hackathon.",
+  "readTime": "8 min read",
+  "status": "published",
+  "artLabel": "CODE & CONTEXT",
+  "artText": "retrieve.\nreview.\nlearn.",
+  "repository": "https://github.com/Swathiga-proj/Github-PR-Reviewer",
+  "sections": [
+    {
+      "title": "The idea",
+      "paragraphs": [
+        "I participated in IBM Bob 2.0, a hackathon conducted by IBM, using the Bob IDE for AI-assisted coding.",
+        "My idea was simple. On GitHub, most open-source maintainers struggle with pull request (PR) reviews, so I built a solution to help with that.",
+        "I started in Plan mode to map out how to execute the project. We were given 40 Bob coins to use the AI. Bob asked follow-up questions, finalised the plan, and broke it into 5 subtasks for its subagents to execute in Agent mode."
+      ]
+    },
+    {
+      "title": "How it works",
+      "paragraphs": [
+        "The core idea is three review lenses: regression, API contracts, and backend pitfalls.",
+        "Before the server starts, an ingestion script reads closed pull requests and project rules and stores them for later retrieval.",
+        "When a pull request is opened, a GitHub webhook triggers the review pipeline. It fetches the diff and file list, sends the relevant context to watsonx.ai, and combines the structured findings into a review.",
+        "The design supports parallel reviews. In the implementation shown below, the three lenses run sequentially to respect watsonx.ai Lite plan rate limits; fetching the diff and file list still happens concurrently."
+      ]
+    },
+    {
+      "title": "1. Regression lens and RAG",
+      "paragraphs": [
+        "This lens looks for changes that could break existing behaviour. Its analysis is grounded in two sources indexed in pgvector: project rules and past pull request history.",
+        "The rules cover API design, code structure, dependencies, async performance, error handling, security, testing, and documentation. Past pull requests provide context about earlier changes.",
+        "Embeddings are generated with watsonx.ai. This ingestion function reads the project rules and GitHub pull request history, then stores the chunks in pgvector."
+      ],
+      "code": "async def ingest(\n    rules_path: Path,\n    github_owner: str,\n    github_repo: str,\n    max_prs: int,\n    dry_run: bool,\n) -> None:\n    # --- 1. Project rules ----------------------------------------------------\n    rule_chunks = chunk_rules(rules_path)\n    for chunk in rule_chunks:\n        if dry_run:\n            logger.info(\"[dry-run] Would upsert %s: %s…\", chunk[\"doc_id\"], chunk[\"text\"][:80])\n        else:\n            logger.info(\"Upserting rule chunk: %s\", chunk[\"doc_id\"])\n            await upsert_document(chunk[\"doc_id\"], chunk[\"text\"], chunk[\"metadata\"])\n    # --- 2. Past PRs ---------------------------------------------------------\n    per_page = min(max_prs, 100)\n    max_pages = max(1, -(-max_prs // per_page))  # ceiling division\n    repo_full = f\"{github_owner}/{github_repo}\"  # ← moved up, defined before use\n    logger.info(\n        \"Fetching up to %d closed PRs from %s/%s…\",\n        max_prs,\n        github_owner,\n        github_repo,\n    )\n    pr_chunk_count = 0\n    async with GithubClient() as gh:\n        prs = await gh.list_past_prs(\n            github_owner, github_repo,\n            per_page=per_page,\n            max_pages=max_pages,\n        )\n        for pr in prs[:max_prs]:\n            chunks = await chunk_pr_with_diff(\n                gh, pr, repo_full, github_owner, github_repo\n            )\n            for chunk in chunks:\n                if dry_run:\n                    logger.info(\"[dry-run] %s → %s…\", chunk[\"doc_id\"], chunk[\"text\"][:70])\n                else:\n                    await upsert_document(chunk[\"doc_id\"], chunk[\"text\"], chunk[\"metadata\"])\n                pr_chunk_count += 1\n    if not dry_run:\n        await close_pool()\n    logger.info(\"Bootstrap complete. Rules: %d, PR chunks: %d\", len(rule_chunks), pr_chunk_count)"
+    },
+    {
+      "title": "2. API contract lens",
+      "paragraphs": [
+        "This lens checks API changes against available contracts. The example looks for a specification in the changed files and falls back to an external registry when no specification is found. It prompts Granite with the diff and contract context, then parses the findings."
+      ],
+      "code": "async def run(diff: str, files: list[dict]) -> LensResult:\n    \"\"\"\n    Run the API Contract Lens against a PR diff.\n    1. Look for a spec file in the changed files.\n    2. Fall back to the external registry if configured and no spec found.\n    3. Prompt Granite with diff + contract context.\n    \"\"\"\n    contract_context = _extract_spec_from_files(files)\n    if contract_context is None:\n        registry_url = get_settings().external_api_registry_url\n        contract_context = await _fetch_from_registry(registry_url)\n    prompt = _build_prompt(diff, contract_context)\n    raw_response = await generate(prompt)\n    findings = _parse_findings(raw_response)\n    passed = all(f.severity != Severity.CRITICAL for f in findings)\n    logger.info(\n        \"API Contract lens: %d findings (%d critical)\",\n        len(findings),\n        sum(1 for f in findings if f.severity == Severity.CRITICAL),\n    )\n    return LensResult(lens_name=LENS_NAME, passed=passed, findings=findings)"
+    },
+    {
+      "title": "3. Backend pitfall lens",
+      "paragraphs": [
+        "This lens looks for common backend anti-patterns, including N+1 queries, missing authentication or authorization, insecure defaults, poor error handling, and dependency or version drift."
+      ],
+      "code": "async def run(diff: str, files: list[dict]) -> LensResult:\n    \"\"\"\n    Run the Backend Pitfall Lens against a PR diff.\n    Prompts Granite to detect anti-patterns across all five categories.\n    \"\"\"\n    prompt = _build_prompt(diff)\n    raw_response = await generate(prompt)\n    findings = _parse_findings(raw_response)\n    passed = all(f.severity != Severity.CRITICAL for f in findings)\n    logger.info(\n        \"Backend Pitfall lens: %d findings (%d critical)\",\n        len(findings),\n        sum(1 for f in findings if f.severity == Severity.CRITICAL),\n    )\n    return LensResult(lens_name=LENS_NAME, passed=passed, findings=findings)\n"
+    },
+    {
+      "title": "Combining the review",
+      "paragraphs": [
+        "The combiner uses the findings to calculate a risk score and create a structured summary. The implementation posts a GitHub PR review with inline annotations where applicable. If inline positions are invalid, it retries with a body-only review.",
+        "The summary is included in the PR review body; this version avoids posting a duplicate top-level issue comment."
+      ],
+      "code": "async def run_review_pipeline(owner: str, repo: str, pull_number: int) -> None:\n    \"\"\"\n    Orchestrate the full PR review:\n      1. Fetch diff and file list from GitHub.\n      2. Run all three lenses in parallel with asyncio.gather.\n      3. Compute risk score and build output.\n      4. Post inline review + top-level summary comment to GitHub.\n    \"\"\"\n    logger.info(\"Starting review pipeline for %s/%s PR #%d\", owner, repo, pull_number)\n    async with GithubClient() as gh:\n        # Step 1 — fetch PR data\n        try:\n            diff, files = await asyncio.gather(\n                gh.get_pr_diff(owner, repo, pull_number),\n                gh.get_pr_files(owner, repo, pull_number),\n            )\n        except Exception as exc:\n            logger.error(\"Failed to fetch PR data: %s\", exc)\n            return\n        # Step 2 — run three lenses sequentially to respect Lite plan rate limits\n        # Switch back to asyncio.gather when on a paid watsonx.ai plan\n        results: list[LensResult] = []\n        try:\n            for coro in [\n                regression_lens.run(diff, files),\n                api_contract_lens.run(diff, files),\n                backend_pitfall_lens.run(diff, files),\n            ]:\n                results.append(await coro)\n        except Exception as exc:\n            logger.error(\"Lens execution failed: %s\", exc)\n            return\n        # Step 3 — combine\n        risk_score = compute_risk_score(results)\n        summary = build_summary_comment(results, risk_score)\n        inline_comments = build_inline_comments(results)\n        logger.info(\n            \"Review complete — risk score: %d, inline comments: %d\",\n            risk_score,\n            len(inline_comments),\n        )\n        # Step 4 — post to GitHub as a PR review (single post, no duplicate issue comment)\n        # Try with inline comments first; fall back to body-only if positions are invalid.\n        try:\n            await gh.post_pr_review(\n                owner, repo, pull_number,\n                review_body=summary,\n                comments=inline_comments,\n            )\n            logger.info(\"Posted PR review with %d inline comments\", len(inline_comments))\n        except Exception as exc:\n            logger.warning(\n                \"PR review with inline comments failed (%s) — retrying without inline comments\", exc\n            )\n            try:\n                await gh.post_pr_review(\n                    owner, repo, pull_number,\n                    review_body=summary,\n                    comments=[],\n                )\n                logger.info(\"Posted PR review (no inline comments)\")\n            except Exception as exc2:\n                logger.error(\"Failed to post PR review: %s\", exc2)"
+    },
+    {
+      "title": "Example output",
+      "paragraphs": [
+        "These screenshots show the review output on GitHub, including lens status, critical findings, warnings, and a risk score."
+      ],
+      "images": [
+        {
+          "src": "/images/reviewmind-output-1.png",
+          "alt": "ReviewMind review showing a failed regression check and findings from three review lenses."
+        },
+        {
+          "src": "/images/reviewmind-output-2.png",
+          "alt": "ReviewMind review showing a low risk score of 15 out of 100 with all three lenses passing."
+        }
+      ]
+    }
+  ]
+}

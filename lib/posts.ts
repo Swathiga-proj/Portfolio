@@ -1,6 +1,8 @@
-export type PostSection = {title:string;paragraphs:string[];code?:string};
-export type Post = {slug:string;title:string;category:string;summary:string;readTime:string;sections:PostSection[]};
+import reviewmind from "./reviewmind.json";
+export type PostSection = {title:string;paragraphs:string[];code?:string;images?:{src:string;alt:string}[]};
+export type Post = {slug:string;title:string;category:string;summary:string;readTime:string;sections:PostSection[];status?:string;artLabel?:string;artText?:string;repository?:string};
 export const posts:Post[]=[
+ reviewmind,
  {slug:"building-a-rag-parsing-pipeline",title:"Building a custom document parsing pipeline for RAG",category:"AI & ENGINEERING",summary:"What I learned about document routing, parser fallbacks, chunking, and quality checks while building a RAG application.",readTime:"4 min read",sections:[
   {title:"From iOS to RAG",paragraphs:["After working in iOS development, I wanted to explore AI by building a RAG application. One of the first challenges was document parsing: missing tables, broken reading order, and incomplete text can affect both retrieval and the answers generated later.","A single parsing library did not handle all my documents consistently. I built a custom pipeline in Python and FastAPI, with PostgreSQL and pgvector for storage and retrieval."]},
   {title:"1. Identify and prepare the document",paragraphs:["Each document receives an ID and metadata including its original filename, client ID, matter ID, and Cloudflare R2 object key. These fields connect extracted content to its source and retrieval scope.","The pipeline receives file bytes and writes a temporary copy with the original extension for parsers that expect a file path. A finally block removes that copy after processing; the original stays in R2."]},
